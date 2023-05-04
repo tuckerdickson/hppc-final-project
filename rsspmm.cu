@@ -31,3 +31,22 @@ for i = seg_start_num [ tb_idx ] to seg_start_num [ tb_idx +1] -1 step tb.size (
 	// directly accumulate results in global memory
 	atomicAdd (& dest_value [ row_idx ][ slice_offset + lane_id ] , val );
 end
+
+//light rows 
+row_offset = ( tb_idx * tb . size () + tid ) / WARP_SIZE ;
+slice_offset = tb_idy * IN_TILE_COL_SIZE ;
+lane_id = tid % WARP_SIZE ;
+start = csr_row_pointer [ row_offset ];
+end = csr_row_pointer [ row_offset +1];
+val = 0;
+for i = start to end -1 do
+	mod = ( i - start )% WARP_SIZE
+	if mod == 0 then
+		index_buf = csr_column_idx [ i + lane_id ];
+		value_buf = csr_column_val [ i + lane_id ];
+	end
+	val += input_value [ __shfl ( index_buf , mod )][ lane_id ]
+	* __shfl ( value_buf , mod );
+end
+// directly accumulate results in global memory
+atomicAdd (& dest_value [ row_offset ][ slice_offset + lane_id ] , val );
