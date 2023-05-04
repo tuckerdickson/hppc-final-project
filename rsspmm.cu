@@ -10,20 +10,12 @@ int tid = threadIdx.x;
 int tb_idx = blockIdx.x;
 int start = 0;
 int end = 0;
-int row_offset;
-int slice_offset;
-int warp_id;
-int lane_id;
-int i;
+int row_offset, slice_offset, warp_id, lane_id, i;
 [int][int] sm_input_value[IN_TILE_ROW_SIZE][WARP_SIZE];
 [int][int] input_value[IN_TILE_ROW_SIZE][IN_TILE_SLICE_SIZE];
 int seg_start_num[IN_TILE_ROW_SIZE];
 int start_seg_position[IN_TILE_ROW_SIZE];
-int index_buf;
-int value_buf;
-int val;
-int mod;
-int row_idx;
+int index_buf, value_buf, val, mod, row_idx;
 int seg_index[IN_TILE_ROW_SIZE];
 
 
