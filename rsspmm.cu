@@ -15,7 +15,7 @@ const int THRESH = 2;
 int start = 0;
 int end = 0;
 
-__global__ void light(int *csr_row_pointer, int *csr_column_idx, int *csr_column_val, int **input_value, int **dest_value){
+__global__ void light(int *csr_row_pointer, int *csr_column_idx, int *csr_column_val, int *input_value, int *dest_value, int n){
     int tid = threadIdx.x;
     int tb_idx = blockIdx.x;
     int tb_idy = blockIdx.y;
@@ -37,11 +37,55 @@ __global__ void light(int *csr_row_pointer, int *csr_column_idx, int *csr_column
 			index_buf = csr_column_idx[i+lane_id];
 			value_buf = csr_column_val[i+lane_id];
 		}
-		val += input_value[__shfl_sync(0xffffffff,index_buf,mod)][lane_id] * __shfl_sync(0xffffffff,value_buf,mod);
+		val += input_value[(__shfl_sync(0xffffffff,index_buf,mod)*n)+lane_id] * __shfl_sync(0xffffffff,value_buf,mod);
 	}
 
 	// directly accumulate results in global memory
-	atomicAdd(&dest_value[row_offset][slice_offset+lane_id], val);
+	atomicAdd(&dest_value[(row_offset*n)+slice_offset+lane_id], val);
+}
+
+__global__ void heavy(int *seg_value, int *seg_index, int *start_seg_position, int *seg_row_position, int *sm_input_value, int *input_value, int *dest_value, int n){
+    int tid = threadIdx.x;
+    int tb_idx = blockIdx.x;
+    int tb_idy = blockIdx.y;
+
+    int IN_TILE_COL_SIZE = 32;
+    int IN_TILE_ROW_SIZE = 32;
+    int IN_TILE_SLICE_SIZE = 32;
+    int WARP_SIZE = 32;
+
+	int row_offset = tb_idx * IN_TILE_ROW_SIZE;
+	int slice_offset = tb_idy * IN_TILE_SLICE_SIZE;
+	int warp_id = tid / WARP_SIZE;
+	int lane_id = tid % WARP_SIZE;
+
+	__syncthreads;
+
+	int ii = 0;
+    int val = 0;
+    
+	//for(int i = seg_start_num[tb_idx]; i <= (seg_start_num[tb_idx+1]-1); i += (blockDim.x / WARP_SIZE)){
+    for(int i = 0; i < sizeof(start_seg_position)/sizeof(start_seg_position[0]); i++){
+		ii = i+1;
+		int start = start_seg_position[i];
+		int end = start_seg_position[i+1];
+        val = 0;
+        int mod = 0;
+        int index_buf = 0;
+        int value_buf = 0;
+
+		for(int j = start; j <= (end-1); j++){
+			mod = (j-start ) % WARP_SIZE;
+			index_buf = seg_index[j+lane_id];
+			value_buf = seg_value[j+lane_id];
+		}
+
+		val += sm_input_value[__shfl_sync(0xffffffff,index_buf,mod )*n+lane_id] * __shfl_sync(0xffffffff,value_buf,mod);
+	}
+		
+	int row_idx = seg_row_position[ii];
+	// directly accumulate results in global memory
+	atomicAdd (&dest_value[row_idx*n+slice_offset+lane_id], val);
 }
 
 int main() {
@@ -61,6 +105,7 @@ int main() {
     int* h_Alv;
     int* h_Alc;
     int* h_Alr;
+
     int* h_B;
     int* h_C;
 
@@ -68,17 +113,96 @@ int main() {
     int* d_Alv;
     int* d_Alc;
     int* d_Alr;
+
     int* d_B;
     int* d_C;
 
-    // allocate memory on host side
+    // allocate memory on host for light matrices
     h_Alv = (int*)malloc(csr[0].size()*sizeof(int));
     h_Alc = (int*)malloc(csr[1].size()*sizeof(int));
     h_Alr = (int*)malloc(csr[2].size()*sizeof(int));
+
     h_B = (int*)malloc(matrix.size()*matrix.size()*sizeof(int));
     h_C = (int*)malloc(matrix.size()*matrix.size()*sizeof(int));
 
-    // initialize A,B and C
+    // initialize light A
+    copy(csr[0].begin(), csr[0].end(), h_Alv);
+    copy(csr[1].begin(), csr[1].end(), h_Alc);
+    copy(csr[2].begin(), csr[2].end(), h_Alr);
+
+    // initialize B and C
+    for(int i = 0; i < matrix.size(); i++){
+        for(int j = 0; j < matrix[0].size(); j++){
+            h_B[(i*matrix.size())+j] = rand() % 2;
+            h_C[(i*matrix.size())+j] = 0;
+        }
+    }
+
+    // allocate light memory on GPU
+    cudaMalloc(&d_Alv, csr[0].size()*sizeof(int));
+    cudaMalloc(&d_Alc, csr[1].size()*sizeof(int));
+    cudaMalloc(&d_Alr, csr[2].size()*sizeof(int));
+
+    cudaMalloc(&d_B, matrix.size()*matrix.size()*sizeof(int));
+    cudaMalloc(&d_C, matrix.size()*matrix.size()*sizeof(int));
+
+    // copy host light data to device
+    cudaMemcpy(d_Alv, h_Alv, csr[0].size()*sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Alc, h_Alc, csr[1].size()*sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Alr, h_Alr, csr[2].size()*sizeof(int), cudaMemcpyHostToDevice);
+
+    cudaMemcpy(d_B, h_B, matrix.size()*matrix.size()*sizeof(int), cudaMemcpyHostToDevice);
+
+    int threadsPerBlk = 16;
+    dim3 blockSize = (threadsPerBlk, threadsPerBlk);
+    dim3 gridSize = (matrix.size()/blockSize.x, matrix.size()/blockSize.y);
+
+    // perform matrix multiplication on device
+    light <<< gridSize, blockSize >>> (d_Alr, d_Alc, d_Alv, d_B, d_C, matrix.size());
+   
+    // perform multiplication for each heavy block
+    for(int i = 0; i < dcsr.size(); i++){
+        // host matrices A, B, and C for heavy multiplication
+        int* h_Ahv;
+        int* h_Ahc;
+        int* h_Ahrp;
+        int* h_Ahri;
+
+        // device matrices A, B, and C for heavy multiplication
+        int* d_Ahv;
+        int* d_Ahc;
+        int* d_Ahrp;
+        int* d_Ahri;
+
+        // allocate memory on host for heavy matrices
+        h_Ahv = (int*)malloc(dcsr[i][0].size()*sizeof(int));
+        h_Ahc = (int*)malloc(dcsr[i][1].size()*sizeof(int));
+        h_Ahrp = (int*)malloc(dcsr[i][2].size()*sizeof(int));
+        h_Ahri = (int*)malloc(dcsr[i][3].size()*sizeof(int));
+
+        // initialize heavy A
+        copy(dcsr[i][0].begin(), dcsr[i][0].end(), h_Ahv);
+        copy(dcsr[i][1].begin(), dcsr[i][1].end(), h_Ahc);
+        copy(dcsr[i][2].begin(), dcsr[i][2].end(), h_Ahrp);
+        copy(dcsr[i][3].begin(), dcsr[i][3].end(), h_Ahri);
+
+        // allocate heavy memory on GPU
+        cudaMalloc(&d_Ahv, dcsr[i][0].size()*sizeof(int));
+        cudaMalloc(&d_Ahc, dcsr[i][1].size()*sizeof(int));
+        cudaMalloc(&d_Ahrp, dcsr[i][2].size()*sizeof(int));
+        cudaMalloc(&d_Ahri, dcsr[i][3].size()*sizeof(int));
+
+        // copy host heavy data to device
+        cudaMemcpy(d_Ahv, h_Ahv, dcsr[i][0].size()*sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_Ahc, h_Ahc, dcsr[i][1].size()*sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_Ahrp, h_Ahrp, dcsr[i][2].size()*sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_Ahri, h_Ahri, dcsr[i][3].size()*sizeof(int), cudaMemcpyHostToDevice);
+
+        heavy <<< gridSize, blockSize >>> (d_Ahv, d_Ahc, d_Ahrp, d_Ahri, d_B, d_B, d_C, matrix.size());
+    }
+
+    // copy device data to host
+    cudaMemcpy(h_C, d_C, matrix.size()*matrix.size()*sizeof(int), cudaMemcpyDeviceToHost);
 
     return 0;
 }
@@ -167,34 +291,3 @@ vector<vector<int>> getLight(vector<vector<int>> lightMatix){
     return csr;
 }
 
-// __global__ void heavy(){
-// 	int row_offset = tb_idx * IN_TILE_ROW_SIZE;
-// 	int slice_offset = tb_idy * IN_TILE_SLICE_SIZE;
-// 	int warp_id = tid / WARP_SIZE;
-// 	int lane_id = tid % WARP_SIZE;
-
-// 	for(int i = warp_id; i <=  IN_TILE_ROW_SIZE; i += (tb.size() / WARP_SIZE)){
-// 		sm_input_value[i][lane_id] = input_value[row_offset+i][slice_offset+lane_id];
-// 	}
-
-// 	__syncthreads ;
-
-// 	for(int i = seg_start_num [ tb_idx ]; i <= (seg_start_num [ tb_idx +1] -1); i+= (tb.size ()/ WARP_SIZE)){
-// 		int val = 0;
-// 		int start = start_seg_position [i ];
-// 		int end = start_seg_position [i +1];
-
-// 		for(int j = start; j <= (end -1); j++){
-		
-// 			mod = ( j - start )% WARP_SIZE
-// 			index_buf = seg_index [ j + lane._id ];
-// 			value_buf = seg_value [ j + lane_id ];
-// 		}
-// 			val += sm_input_value [ __shfl ( index_buf , mod )][ lane_id ]
-// 			* __shfl ( value_buf , mod );
-// 	}
-		
-// 	int row_idx = seg_row_position [i];
-// 	// directly accumulate results in global memory
-// 	atomicAdd (& dest_value [ row_idx ][ slice_offset + lane_id ] , val );
-// }
