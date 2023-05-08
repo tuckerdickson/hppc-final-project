@@ -1,0 +1,33 @@
+
+
+
+
+
+*============================= BEGINNING TEST FOR THRESHOLD = 1 =============================*
+Light multiplication completed in: 30 usec
+Heavy multiplication completed in: 196937 usec
+Total time: 196967 usec
+*============================= BEGINNING TEST FOR THRESHOLD = 2 =============================*
+Light multiplication completed in: 16 usec
+Heavy multiplication completed in: 175604 usec
+Total time: 175620 usec
+*============================= BEGINNING TEST FOR THRESHOLD = 4 =============================*
+Light multiplication completed in: 16 usec
+Heavy multiplication completed in: 42022 usec
+Total time: 42038 usec
+*============================= BEGINNING TEST FOR THRESHOLD = 8 =============================*
+Light multiplication completed in: 3 usec
+Heavy multiplication completed in: 936 usec
+Total time: 939 usec
+*============================= BEGINNING TEST FOR THRESHOLD = 16 =============================*
+Light multiplication completed in: 3 usec
+Heavy multiplication completed in: 922 usec
+Total time: 925 usec
+*============================= BEGINNING TEST FOR THRESHOLD = 32 =============================*
+Light multiplication completed in: 3 usec
+Heavy multiplication completed in: 927 usec
+Total time: 930 usec
+*============================= BEGINNING TEST FOR THRESHOLD = 64 =============================*
+Light multiplication completed in: 3 usec
+Heavy multiplication completed in: 925 usec
+Total time: 928 usec
